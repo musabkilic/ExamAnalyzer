@@ -12,6 +12,9 @@ import string
 import pprint
 import io
 import base64
+import html2text
+import json
+import sqlite3
 
 def createPage(Q):
     page = """<html>
@@ -46,18 +49,27 @@ def createPage(Q):
       </body>
     </html>
     """
+    nQ = {"choices":[]}
     W, H = Q["W"], Q["H"]
-    content = f"<script>W={W};H={H};</script>"
+    content = ""
+    pcontent = f"<script>W={W};H={H};</script>"
     for t in Q["question"]:
-        content += f'<span style="left:{100*t[1]/W}%;top:{100*t[2]/H}%;font-size:{100*t[4]/H}%;">{t[0]}</span>\n'
+        pcontent += f'<span style="left:{100*t[1]/W}%;top:{100*t[2]/H}%;font-size:{100*t[4]/H}%;">{t[0]}</span>\n'
+    nQ["question"] = html2text.html2text(pcontent).strip()
+    content += pcontent
+    content += "<br/>"
+    content += "<br/>"
     for c in Q["choices"]:
+        pcontent = ""
         for t in c:
-            content += f'<span style="left:{100*t[1]/W}%;top:{100*t[2]/H}%;font-size:{100*t[4]/H}%;">{t[0]}</span>\n'
+            pcontent += f'<span style="left:{100*t[1]/W}%;top:{100*t[2]/H}%;font-size:{100*t[4]/H}%;">{t[0]}</span>\n'
+        nQ["choices"].append(html2text.html2text(pcontent).strip())
+        content += pcontent + "<br/>"
     page = page.replace("{content}", content)
     page = page.replace("{background}", Q["background"])
-    return page
+    return (page, nQ)
 
-def splitChoices(question, n):
+def splitChoices(question, n, con):
     H, W = question.shape[:2]
     d = pytesseract.image_to_data(question, output_type=Output.DICT, lang="spa")
     n_boxes = len(d['level'])
@@ -148,11 +160,19 @@ def splitChoices(question, n):
                 if len(d["text"][j].strip()) > 0:
                     text.append([d["text"][j], x+int(avg_marg1[1])-10, y+y1, w, h])
         Q["choices"].append(text)
-    with open(f"{n}.html", "w") as f:
-        f.write(createPage(Q))
-        return True
+    Image.fromarray(question).save(f"{n}.pdf", "PDF" ,resolution=100.0, save_all=True)
+    page, Q = createPage(Q)
+    with open(f"{n}.json", "w") as f:
+        json.dump(Q, f)
+    sql = ''' INSERT INTO questions(question, a, b, c, d)
+          VALUES(?,?,?,?,?) '''
 
-def splitQuestions(page, num):
+    Q["choices"] += [" "] * (4 - len(Q["choices"]))
+    con.cursor().execute(sql, (Q["question"], Q["choices"][0], Q["choices"][1], Q["choices"][2], Q["choices"][3]))
+    con.commit()
+    return True
+
+def splitQuestions(page, num, con):
     path = os.path.join(tempfile.gettempdir(), f"page_{page}.png")
     r_img = cv2.imread(path)
     img = cv2.imread(path)
@@ -189,7 +209,7 @@ def splitQuestions(page, num):
             if d["text"][i][:-1].isdigit():
                 total_marg0 = [total_marg0[j]+[x, w+x][j] for j in range(2)]
                 marg0.append([x, w+x, y, y+h, d["text"][i]])
-    cv2.imwrite(f"{page}w.png", np.array(img_pil))
+    #cv2.imwrite(f"{page}w.png", np.array(img_pil))
     avg_marg0 = [x/len(marg0) for x in total_marg0]
     print()
     print(marg0)
@@ -213,8 +233,8 @@ def splitQuestions(page, num):
     nums = r_img[0:H, numX1:numX2].copy()
     #cv2.imshow('img', img)
     #cv2.waitKey(0)
-    cv2.imwrite(f"{page}p.png", img)
-    cv2.imwrite(f"{page}n.png", nums)
+    #cv2.imwrite(f"{page}p.png", img)
+    #cv2.imwrite(f"{page}n.png", nums)
     print(d.keys())
 
 
@@ -246,11 +266,11 @@ def splitQuestions(page, num):
     false_trues = 0
     for i in range(len(cuts)-1):
         y1, y2 = cuts[i], cuts[i+1]
-        if not splitChoices(r_img[y1:y2, int(avg_marg1[0])-10:W], num+1+i-false_trues):
+        if not splitChoices(r_img[y1:y2, int(avg_marg1[0])-10:W], num+1+i-false_trues, con):
             false_trues += 1
     print(cuts)
     print(marg1)
-    cv2.imwrite(f"{page}r.png", nums)
+    #cv2.imwrite(f"{page}r.png", nums)
     return len(cuts) - 1 - false_trues
 
 if __name__ == "__main__":
@@ -260,6 +280,20 @@ if __name__ == "__main__":
     pdf_file = args.file
     num = 0
     pages = convert_from_path(pdf_file, 500)
+    open(f"{pdf_file}.db", "w").close()
+    con = sqlite3.connect(f"{pdf_file}.db")
+
+    create_table = """ CREATE TABLE IF NOT EXISTS questions (
+                            id integer PRIMARY KEY,
+                            question text NOT NULL,
+                            a text,
+                            b text,
+                            c text,
+                            d text
+                        );
+                   """
+
+    con.cursor().execute(create_table)
     for i, page in enumerate(pages):
         page.save(os.path.join(tempfile.gettempdir(), f"page_{i+1}.png"))
-        num += splitQuestions(i+1, num)
+        num += splitQuestions(i+1, num, con)
